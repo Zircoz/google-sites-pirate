@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Google Sites Scraper outputs and secrets
+scraped_sites/
+token.json
+playwright_auth.json
+client_secret*.json
