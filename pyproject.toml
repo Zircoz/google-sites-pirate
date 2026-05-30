@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "google-sites-pirate"
+version = "1.0.0"
+description = "Retrieve metadata and scrape Google Sites page-by-page into Markdown format for RAG applications."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+dependencies = [
+    "google-api-python-client",
+    "google-auth",
+    "google-auth-oauthlib",
+    "google-auth-httplib2",
+    "markdownify>=0.11,<1.0",
+    "beautifulsoup4>=4.12,<5",
+    "lxml",
+    "playwright",
+    "requests",
+]
+
+[project.urls]
+Homepage = "https://github.com/Zircoz/google-sites-pirate"
+
+[project.scripts]
+google-sites-pirate = "google_sites_pirate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["google_sites_pirate*"]

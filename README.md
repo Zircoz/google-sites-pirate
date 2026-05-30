@@ -1,70 +1,131 @@
 # Google Sites Pirate Scraper
 
-This repository contains tools to retrieve metadata and scrape Google Sites page-by-page into Markdown format for RAG applications.
+This repository contains tools to retrieve metadata and scrape Google Sites page-by-page into Markdown format for RAG (Retrieval-Augmented Generation) applications.
 
 ---
 
-## Google Sites Scraper (`scrape_google_sites.py`)
+## Installation
 
-This script discovers Google Sites via the Google Drive API or scrapes a direct published URL. It uses Playwright to render JavaScript-heavy layouts and converts the content to clean Markdown with front-matter metadata.
+Install the package directly from this repository:
 
-### Setup
+```bash
+pip install .
+```
 
-1. **Install Python dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+After installation, install the required Playwright browser binary:
 
-2. **Install Playwright Browser Binaries**:
-   ```bash
-   playwright install chromium
-   ```
+```bash
+playwright install chromium
+```
 
-### Usage
+---
+
+## Command-Line Interface (`google-sites-pirate`)
+
+This package registers a global command `google-sites-pirate` which supports two main subcommands: `scrape` and `info`.
+
+---
+
+### 1. `scrape` Command
+
+Scrapes Google Sites page-by-page. It renders the site using Playwright to handle JavaScript-heavy layouts and converts the page content into Markdown with front-matter metadata.
 
 #### Mode A: Scraping via Direct URL (No Google Cloud Platform Setup Needed)
 If you have a public Google Site URL, you can scrape it directly without needing Google Cloud credentials or API tokens:
 ```bash
-python scrape_google_sites.py --url <published_site_url>
+google-sites-pirate scrape --url <published_site_url>
 ```
 *Example:*
 ```bash
-python scrape_google_sites.py --url https://sites.google.com/view/mpi-agri-farm/
+google-sites-pirate scrape --url https://sites.google.com/view/mpi-agri-farm/
 ```
 
-#### Mode B: Auto-Discovering & Scraping via Google Drive (OAuth Credentials Needed)
+#### Mode B: Discovery via Google Drive (OAuth Credentials Needed)
 To list and auto-scrape all sites associated with your Google Account:
-
-1. Obtain an **OAuth Client ID JSON** file (configured as a Web Application with redirect URI `http://localhost:8080`) from the Google Cloud Console.
-2. Run the script:
+1. Run the command:
    ```bash
-   python scrape_google_sites.py --credentials path/to/client_secret.json
+   google-sites-pirate scrape --credentials path/to/client_secret.json
    ```
-3. The script will automatically prompt you to authenticate in your browser, cache the token, discover your sites, resolve their published URLs, and scrape them.
+2. The command will automatically prompt you to authenticate in your browser, cache the token to `token.json`, discover your sites, resolve their published URLs, and scrape them.
 
-*To scrape a specific site ID only:*
+To scrape a specific site ID only via OAuth:
 ```bash
-python scrape_google_sites.py --credentials path/to/client_secret.json --site-id <google_drive_file_id>
+google-sites-pirate scrape --credentials path/to/client_secret.json --site-id <google_drive_file_id>
 ```
+
+#### Mode C: Google Service Account (Recommended for Non-Interactive Pipelines)
+To run in a headless, non-interactive CI/CD pipeline, you can use a Google Service Account:
+```bash
+google-sites-pirate scrape --service-account path/to/service_account.json
+```
+*Note: Make sure to share your Google Sites (or their Google Drive folders) with the Service Account email address.*
 
 #### Private Sites & Authentication
-To scrape private/unpublished sites, you can pass a Playwright browser session state (containing authentication cookies):
+To scrape private or unpublished sites, you can pass a Playwright browser session state (containing authentication cookies):
 ```bash
-python scrape_google_sites.py --url <private_site_url> --playwright-auth path/to/cookies.json
+google-sites-pirate scrape --url <private_url> --playwright-auth path/to/cookies.json
 ```
 
 ---
 
-## Drive File Info Utilities
+### 2. `info` Command
 
-### 1. Service Account Metadata Lookup (`get_drive_file_info.py`)
-Retrieves basic Drive file metadata using a Google Cloud Service Account:
+Retrieves basic Google Drive file metadata and published status details.
+
+#### Retrieve Metadata via Service Account
 ```bash
-python get_drive_file_info.py <file_id> <path_to_credential.json>
+google-sites-pirate info <file_id> --service-account path/to/service_account.json
 ```
 
-### 2. User OAuth Metadata Lookup (`get_drive_file_info_oauth.py`)
-Retrieves basic Drive file metadata using user OAuth authentication:
+#### Retrieve Metadata via User OAuth
 ```bash
-python get_drive_file_info_oauth.py <file_id> <path_to_client_secret.json>
+google-sites-pirate info <file_id> --credentials path/to/client_secret.json
+```
+
+---
+
+## Environment Variable Authentication
+
+For stateless environments (e.g. Docker, GitLab CI/CD, GitHub Actions) where mounting secret files is undesirable, you can set the following environment variables. The CLI will automatically detect them:
+
+*   **Google Service Account**: Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the raw JSON string content of your service account key.
+*   **Google Client Secrets (OAuth)**: Set `GOOGLE_CREDENTIALS_JSON` to the raw JSON string content of your client secrets.
+*   **Cached OAuth Token**: Set `GOOGLE_TOKEN_JSON` to the raw JSON string content of your cached user token.
+
+When these environment variables are set, you can run the commands without specifying the file path flags:
+```bash
+# Automatically picks up service account details from the environment variable
+google-sites-pirate scrape
+```
+
+---
+
+## Stateless CI/CD Pipeline Integration (GitLab CI Example)
+
+Below is an example `.gitlab-ci.yml` showing how to run the scraper in a CI/CD job using a Google Service Account stored as an environment variable (`GOOGLE_SERVICE_ACCOUNT_JSON`):
+
+```yaml
+stages:
+  - scrape
+
+run-scraper:
+  stage: scrape
+  image: python:3.11-slim
+  variables:
+    # Ensure Playwright dependencies are handled, or use the official playwright image
+    PLAYWRIGHT_BROWSERS_PATH: "$CI_PROJECT_DIR/.playwright"
+  cache:
+    paths:
+      - .playwright/
+  script:
+    # Install dependencies
+    - pip install .
+    # Install browser and system dependencies for Playwright
+    - playwright install chromium --with-deps
+    # Execute scraper. Auth token is read directly from environment
+    - google-sites-pirate scrape --output output_dir
+  artifacts:
+    paths:
+      - output_dir/
+    expire_in: 1 week
 ```
