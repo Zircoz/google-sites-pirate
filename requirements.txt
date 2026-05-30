@@ -1,0 +1,9 @@
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+markdownify>=0.11,<1.0
+beautifulsoup4>=4.12,<5
+lxml
+playwright
+requests
