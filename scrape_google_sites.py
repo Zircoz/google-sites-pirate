@@ -32,9 +32,15 @@ def build_oauth_creds(credentials_file,token_file="token.json"):
     if os.path.exists(token_file):
         creds=Credentials.from_authorized_user_file(token_file,SCOPES)
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
-            print("  Refreshing expired token...");creds.refresh(Request())
-        else:
+            try:
+                print("  Refreshing expired token...")
+                creds.refresh(Request())
+                refreshed = True
+            except Exception as e:
+                print(f"  Token refresh failed: {e}. Re-authenticating...")
+        if not refreshed:
             print("  Opening browser for Google sign-in...")
             flow=InstalledAppFlow.from_client_secrets_file(credentials_file,SCOPES)
             creds=flow.run_local_server(port=OAUTH_PORT)
@@ -75,39 +81,61 @@ def get_published_url(drive_svc,site_id):
 
 # ── page discovery ────────────────────────────────────────────────────────────
 
-def discover_page_urls(published_url):
+def discover_page_urls(published_url, auth_state=None):
     """
     Fetch the published site home page and collect internal nav links.
     Returns list of absolute page URLs (deduplicated, same-site only).
     """
-    import requests as req
+    sync_playwright=_ensure_playwright()
+    if not sync_playwright:
+        raise RuntimeError("Playwright is required for page discovery")
+
     base=published_url.rstrip("/")
-    # derive the base path prefix (e.g. /view/my-site)
     from urllib.parse import urlparse
     parsed=urlparse(base)
     path_prefix=parsed.path.rstrip("/")
 
-    resp=req.get(base,timeout=20)
-    resp.raise_for_status()
-    soup=BeautifulSoup(resp.text,"lxml")
-
-    seen=set()
     pages=[]
-    for a in soup.find_all("a",href=True):
-        href=a["href"].strip()
-        # normalise relative → absolute
-        if href.startswith("/"):
-            href=f"{parsed.scheme}://{parsed.netloc}{href}"
-        if path_prefix and path_prefix in href:
-            # strip query / fragment
-            href=href.split("?")[0].split("#")[0]
-            if href not in seen:
-                seen.add(href)
-                title=a.get_text(strip=True) or href.rstrip("/").split("/")[-1]
-                pages.append({"url":href,"title":title})
-    # Ensure the home page itself is included (as first entry)
-    if base not in seen:
-        pages.insert(0,{"url":base,"title":"Home"})
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        ctx_kwargs={"viewport":{"width":1280,"height":900}}
+        if auth_state and os.path.exists(auth_state):
+            ctx_kwargs["storage_state"]=auth_state
+        ctx=browser.new_context(**ctx_kwargs)
+        bpage=ctx.new_page()
+
+        try:
+            bpage.goto(base,wait_until="networkidle",timeout=45000)
+            
+            # Check if we landed on login page
+            final_url=bpage.url
+            if "accounts.google.com" in final_url:
+                print(f"    [WARN] Page discovery redirected to Google sign-in. Check your --playwright-auth state.")
+            
+            html=bpage.content()
+            soup=BeautifulSoup(html,"lxml")
+            
+            seen=set()
+            for a in soup.find_all("a",href=True):
+                href=a["href"].strip()
+                # normalise relative → absolute
+                if href.startswith("/"):
+                    href=f"{parsed.scheme}://{parsed.netloc}{href}"
+                if path_prefix and path_prefix in href:
+                    # strip query / fragment
+                    href=href.split("?")[0].split("#")[0]
+                    if href not in seen:
+                        seen.add(href)
+                        title=a.get_text(strip=True) or href.rstrip("/").split("/")[-1]
+                        pages.append({"url":href,"title":title})
+            
+            # Ensure the home page itself is included (as first entry)
+            if base not in seen:
+                pages.insert(0,{"url":base,"title":"Home"})
+        finally:
+            ctx.close()
+            browser.close()
+            
     return pages
 
 # ── Playwright rendering ──────────────────────────────────────────────────────
@@ -246,35 +274,48 @@ def write_site_pages(site_id,site_name,scraped_pages,output_dir):
 
 def parse_args(argv=None):
     p=argparse.ArgumentParser(description="Scrape Google Sites page-by-page for RAG")
-    p.add_argument("--credentials",required=True,help="OAuth client ID JSON")
+    p.add_argument("--credentials",help="OAuth client ID JSON")
+    p.add_argument("--url",help="Direct published URL of a Google Site to scrape")
     p.add_argument("--site-id",help="Drive file ID of a specific site")
     p.add_argument("--output",default="scraped_sites",help="Output directory")
     p.add_argument("--token-file",default="token.json",help="OAuth token cache")
     p.add_argument("--playwright-auth",default=None,
                    help="Path to Playwright storage state JSON for private sites")
-    return p.parse_args(argv)
+    args=p.parse_args(argv)
+    if not args.url and not args.credentials:
+        p.error("either --credentials or --url is required")
+    return args
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
     args=parse_args(argv)
-    print("\n[AUTH]  Authenticating via OAuth...")
-    creds=build_oauth_creds(args.credentials,args.token_file)
-    print("  [OK] Credentials ready")
-    svc=build("drive","v3",credentials=creds)
     out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
 
-    if args.site_id:
-        print(f"\n[TARGET]  Site ID: {args.site_id}")
-        try:
-            meta=svc.files().get(fileId=args.site_id,fields="id,name",supportsAllDrives=True).execute()
-            sites=[meta]
-        except HttpError as e:
-            print(f"[ERROR] {e}");sys.exit(1)
+    if args.url:
+        from urllib.parse import urlparse
+        parsed = urlparse(args.url)
+        # extract last slug or default name
+        sname = parsed.path.rstrip("/").split("/")[-1] or "scraped_site"
+        sid = "url_input"
+        sites = [{"id": sid, "name": sname, "url": args.url}]
     else:
-        print("\n[SEARCH]  Discovering sites...")
-        sites=discover_sites(svc)
-        print(f"  Found {len(sites)} site(s)")
+        print("\n[AUTH]  Authenticating via OAuth...")
+        creds=build_oauth_creds(args.credentials,args.token_file)
+        print("  [OK] Credentials ready")
+        svc=build("drive","v3",credentials=creds)
+
+        if args.site_id:
+            print(f"\n[TARGET]  Site ID: {args.site_id}")
+            try:
+                meta=svc.files().get(fileId=args.site_id,fields="id,name",supportsAllDrives=True).execute()
+                sites=[meta]
+            except HttpError as e:
+                print(f"[ERROR] {e}");sys.exit(1)
+        else:
+            print("\n[SEARCH]  Discovering sites...")
+            sites=discover_sites(svc)
+            print(f"  Found {len(sites)} site(s)")
 
     if not sites:
         print("[WARN] No sites found.");return
@@ -285,17 +326,21 @@ def main(argv=None):
         print(f"\n[SCRAPE]  {sname!r}")
 
         # 1. Get published URL
-        pub_url,is_public=get_published_url(svc,sid)
-        if not pub_url:
-            print("  [SKIP] Site is not published — no published URL found.")
-            print("  Publish the site in Google Sites and re-run.")
-            continue
+        if "url" in s:
+            pub_url = s["url"]
+            is_public = True
+        else:
+            pub_url,is_public=get_published_url(svc,sid)
+            if not pub_url:
+                print("  [SKIP] Site is not published — no published URL found.")
+                print("  Publish the site in Google Sites and re-run.")
+                continue
         print(f"  Published URL : {pub_url}")
         print(f"  Public access : {is_public}")
 
         # 2. Discover page URLs from nav links
         try:
-            page_infos=discover_page_urls(pub_url)
+            page_infos=discover_page_urls(pub_url, auth_state=args.playwright_auth)
         except Exception as e:
             print(f"  [FAIL] Could not fetch nav links: {e}");continue
         print(f"  Discovered {len(page_infos)} page URL(s):")
