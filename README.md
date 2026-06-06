@@ -2,6 +2,8 @@
 
 This repository contains tools to retrieve metadata and scrape Google Sites page-by-page into Markdown format for RAG (Retrieval-Augmented Generation) applications.
 
+Looking to integrate this package programmatically into your Python code or contribute to its development? Check out the [Developer Guide](docs/developer_guide.md).
+
 ---
 
 ## Installation
