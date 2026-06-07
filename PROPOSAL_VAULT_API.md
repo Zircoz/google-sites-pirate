@@ -42,12 +42,18 @@ By integrating Vault API, `google-sites-pirate` can request server-side bulk exp
 
 We propose adding a new subcommand or mode to the CLI: `google-sites-pirate vault-export`.
 
-### Step 1: Authentication & Authorization
-*   Require a Google Service Account with **Google Vault Administrator** privileges or appropriate delegated admin roles.
-*   Require the `https://www.googleapis.com/auth/ediscovery` OAuth scope.
+### Step 1: Authentication & Authorization (Service Account)
+To operate headlessly in an enterprise, the tool will use a **Google Cloud Service Account** instead of requiring interactive user OAuth.
 
-### Step 2: Matter & Query Creation
-*   Use the `vault_v1.matters().create()` API to create a dedicated matter (e.g., "RAG Ingestion - Sites").
+There are two primary ways a Service Account can access Vault Matters created by human administrators:
+1. **Domain-Wide Delegation (Recommended for Enterprise)**: A Google Workspace super admin can grant the Service Account [Domain-Wide Delegation](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority). This allows the Service Account to impersonate a human Vault Administrator and access all matters that the human admin can see.
+2. **Direct Matter Collaboration**: Alternatively, a human Vault Administrator can create a Matter in the Vault UI and explicitly add the Service Account's email address (e.g., `my-sa@project.iam.gserviceaccount.com`) as a **Collaborator** on that specific Matter using the [matters.addPermissions](https://developers.google.com/workspace/vault/reference/rest/v1/matters/addPermissions) API or via the Vault UI.
+
+The tool will require the `https://www.googleapis.com/auth/ediscovery` OAuth scope.
+
+### Step 2: Matter Selection & Query Creation
+*   The human admin will create a Matter (e.g., "RAG Ingestion - Sites") and either share it with the Service Account or allow the Service Account to impersonate them.
+*   The tool will accept a `--matter-id` argument.
 *   Construct a Query targeting the `DRIVE` corpus:
     ```python
     query = {
