@@ -15,6 +15,14 @@ from google_sites_pirate.scraper import (
     render_pages_playwright,
     write_site_pages,
 )
+from google_sites_pirate.vault import (
+    find_vault_export_files,
+    parse_metadata_xml,
+    parse_custodian_csv,
+    link_pdfs_to_metadata,
+    ingest_vault_export,
+    merge_with_scrape,
+)
 
 def run_scrape(args):
     out = Path(args.output)
@@ -149,6 +157,58 @@ def run_info(args):
         sys.exit(1)
 
 
+def run_vault(args):
+    export_dir = Path(args.export_dir)
+    if not export_dir.exists():
+        print(f'[ERROR] Export directory not found: {export_dir}')
+        sys.exit(1)
+
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if args.merge:
+        # Two-phase mode: ingest vault, then merge into existing scraper output
+        merge_dir = Path(args.merge)
+        if not merge_dir.exists():
+            print(f'[ERROR] Merge target directory not found: {merge_dir}')
+            sys.exit(1)
+
+        print(f'[VAULT] Mode: merge into existing scraper output at {merge_dir}')
+
+        # Parse vault export to get page metadata + link PDFs
+        _, _, pdf_paths = find_vault_export_files(export_dir)
+        xml_path = next(export_dir.rglob('*-metadata.xml'), None) or next(export_dir.rglob('*.xml'), None)
+
+        vault_pages = []
+        if xml_path:
+            print(f'[VAULT] Parsing {xml_path.name}...')
+            vault_pages = parse_metadata_xml(xml_path)
+            print(f'  {len(vault_pages)} page record(s) found')
+        if pdf_paths:
+            vault_pages = link_pdfs_to_metadata(vault_pages, pdf_paths)
+            linked = sum(1 for p in vault_pages if p.pdf_path)
+            print(f'  {linked}/{len(vault_pages)} pages linked to PDFs')
+
+        if not vault_pages:
+            print('[WARN] No vault pages found — nothing to merge.')
+            return
+
+        result_dir, enriched, added = merge_with_scrape(merge_dir, vault_pages)
+        print(
+            f'\n[DONE] Merge complete → {result_dir.resolve()}\n'
+            f'  {enriched} existing page(s) enriched with vault metadata\n'
+            f'  {added} hidden-nav page(s) added from vault'
+        )
+    else:
+        # Standalone mode: write vault export as its own Markdown directory
+        d, n = ingest_vault_export(
+            export_dir=export_dir,
+            output_dir=out,
+            site_name=args.site_name or '',
+        )
+        print(f'\n[DONE] {n} page(s) written → {d.resolve()}')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Google Sites per-page scraper and Drive metadata tool."
@@ -166,6 +226,36 @@ def main(argv=None):
     scrape_parser.add_argument("--playwright-auth", help="Path to Playwright storage state JSON (cookies) for private sites")
     scrape_parser.add_argument("--non-interactive", action="store_true", help="Disable interactive OAuth web browser prompt")
 
+    # Vault subcommand
+    vault_parser = subparsers.add_parser(
+        "vault",
+        help="Ingest a Google Vault GSites export (metadata XML + PDFs) into Markdown",
+    )
+    vault_parser.add_argument(
+        "export_dir",
+        help="Path to the Vault export directory (containing *-metadata.xml and *_gsite_0/*.pdf)",
+    )
+    vault_parser.add_argument(
+        "--output",
+        default="vault_output",
+        help="Output directory for Markdown files (default: vault_output)",
+    )
+    vault_parser.add_argument(
+        "--merge",
+        metavar="SCRAPE_DIR",
+        help=(
+            "Path to an existing google-sites-pirate scraper output directory. "
+            "When set, vault metadata is merged into that output: matched pages are "
+            "enriched with vault_* frontmatter fields, and hidden-nav pages are added "
+            "as new files."
+        ),
+    )
+    vault_parser.add_argument(
+        "--site-name",
+        default="",
+        help="Override the site display name used for the output subdirectory",
+    )
+
     # Info subcommand
     info_parser = subparsers.add_parser("info", help="Retrieve metadata info of a Google Drive file")
     info_parser.add_argument("file_id", help="The Google Drive file ID to inspect")
@@ -176,7 +266,9 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
 
-    if args.command == "scrape":
+    if args.command == "vault":
+        run_vault(args)
+    elif args.command == "scrape":
         # Validate that we have some way to identify the target
         if not args.url and not args.credentials and not args.service_account:
             # Check environment variables before complaining
