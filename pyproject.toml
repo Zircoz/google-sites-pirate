@@ -19,6 +19,7 @@ dependencies = [
     "lxml",
     "playwright",
     "requests",
+    "pdfminer.six>=20221105",
 ]
 
 [project.urls]
