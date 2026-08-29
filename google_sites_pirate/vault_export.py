@@ -12,14 +12,21 @@ Pipeline:
                              admin via Domain-Wide Delegation)
   → create_sites_export     (matters().exports().create(), DRIVE corpus,
                              terms='type:site', ORG_UNIT or ACCOUNT scope)
-  → poll_export              (matters().exports().get() until COMPLETED)
-  → download_export          (pull each Cloud Storage object to a local dir)
+  → poll_export              (matters().exports().get() until COMPLETED,
+                             retrying transient API errors)
+  → download_export          (pull each Cloud Storage object to a local
+                             dir, extracting the zip archives that Vault
+                             Drive exports actually deliver)
 """
 
+import json
+import os
 import time
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 from typing import List, Optional
 
+from google.auth import exceptions as google_auth_exceptions
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -29,6 +36,22 @@ GCS_READONLY_SCOPE = "https://www.googleapis.com/auth/devstorage.read_only"
 
 # Export reaches a terminal state once status leaves these.
 _IN_PROGRESS_STATUSES = ("EXPORT_STATUS_UNSPECIFIED", "IN_PROGRESS")
+
+# HTTP statuses worth retrying on a transient API hiccup during a
+# potentially hour-long poll loop.
+_RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504)
+
+_DWD_HINT = (
+    "This usually means the Service Account is missing Domain-Wide "
+    "Delegation authorization for BOTH required scopes:\n"
+    f"    {VAULT_SCOPE}\n"
+    f"    {GCS_READONLY_SCOPE}\n"
+    "A Workspace super admin must authorize the Service Account's client ID "
+    "for both scopes in Admin console -> Security -> API controls -> "
+    "Domain-wide delegation. Alternatively, add the Service Account as a "
+    "collaborator on the Matter directly (see PROPOSAL_VAULT_API.md) — no "
+    "--subject is needed in that case."
+)
 
 
 def build_vault_credentials(
@@ -41,8 +64,20 @@ def build_vault_credentials(
     `subject` is the email of a human Vault Administrator to impersonate via
     Domain-Wide Delegation — required unless the Service Account has been
     added directly as a Matter collaborator (see PROPOSAL_VAULT_API.md).
+
+    Falls back to the GOOGLE_SERVICE_ACCOUNT_JSON environment variable when
+    neither `service_account_info` nor `service_account_path` is given, for
+    parity with auth.get_google_creds().
     """
     scopes = [VAULT_SCOPE, GCS_READONLY_SCOPE]
+
+    if not service_account_info and not service_account_path:
+        env_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if env_json:
+            try:
+                service_account_info = json.loads(env_json)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON env var: {e}")
 
     if service_account_info:
         creds = service_account.Credentials.from_service_account_info(
@@ -55,7 +90,10 @@ def build_vault_credentials(
             service_account_path, scopes=scopes
         )
     else:
-        raise ValueError("Either service_account_info or service_account_path is required")
+        raise ValueError(
+            "Either service_account_info, service_account_path, or the "
+            "GOOGLE_SERVICE_ACCOUNT_JSON environment variable is required"
+        )
 
     if subject:
         creds = creds.with_subject(subject)
@@ -64,6 +102,29 @@ def build_vault_credentials(
 
 def build_vault_service(creds):
     return build("vault", "v1", credentials=creds, cache_discovery=False)
+
+
+def _execute_with_retry(request_factory, description: str, max_attempts: int = 5,
+                         base_delay_seconds: float = 2.0, sleep_fn=time.sleep):
+    """Call `request_factory().execute()`, retrying transient (429/5xx) errors.
+
+    Non-retryable HttpErrors (403 access denied, 404 unknown matter, etc.)
+    and auth failures are raised immediately with an actionable message.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request_factory().execute()
+        except google_auth_exceptions.RefreshError as e:
+            raise RuntimeError(f"{description} failed: could not obtain an access token ({e}).\n{_DWD_HINT}")
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            if status in _RETRYABLE_HTTP_STATUSES and attempt < max_attempts:
+                delay = base_delay_seconds * (2 ** (attempt - 1))
+                print(f"    [RETRY] {description} got HTTP {status}, retrying in {delay:.0f}s "
+                      f"(attempt {attempt}/{max_attempts})...")
+                sleep_fn(delay)
+                continue
+            raise RuntimeError(f"{description} failed: {e}")
 
 
 def create_sites_export(
@@ -101,17 +162,17 @@ def create_sites_export(
         "exportOptions": {"driveOptions": {"includeAccessInfo": True}},
     }
 
-    try:
-        return vault_svc.matters().exports().create(matterId=matter_id, body=body).execute()
-    except HttpError as e:
-        raise RuntimeError(f"Failed to create Vault export: {e}")
+    return _execute_with_retry(
+        lambda: vault_svc.matters().exports().create(matterId=matter_id, body=body),
+        description="Creating Vault export",
+    )
 
 
 def get_export(vault_svc, matter_id: str, export_id: str):
-    try:
-        return vault_svc.matters().exports().get(matterId=matter_id, exportId=export_id).execute()
-    except HttpError as e:
-        raise RuntimeError(f"Failed to fetch Vault export status: {e}")
+    return _execute_with_retry(
+        lambda: vault_svc.matters().exports().get(matterId=matter_id, exportId=export_id),
+        description="Fetching Vault export status",
+    )
 
 
 def poll_export(
@@ -125,7 +186,9 @@ def poll_export(
     """Block until the export reaches a terminal state, returning the resource.
 
     Raises RuntimeError if the export fails, TimeoutError if it does not
-    finish within `timeout_seconds`.
+    finish within `timeout_seconds`. On timeout, the export keeps running
+    server-side — re-invoke with the same matter_id/export_id (--export-id
+    on the CLI) to resume waiting instead of creating a duplicate export.
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -134,20 +197,53 @@ def poll_export(
         if status == "COMPLETED":
             return export
         if status not in _IN_PROGRESS_STATUSES:
-            raise RuntimeError(f"Vault export {export_id} ended with status {status!r}: {export}")
+            raise RuntimeError(
+                f"Vault export {export_id} (matter {matter_id}) ended with status {status!r}"
+            )
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                f"Vault export {export_id} did not complete within {timeout_seconds}s "
-                f"(last status: {status!r})"
+                f"Vault export {export_id} (matter {matter_id}) did not complete within "
+                f"{timeout_seconds}s (last status: {status!r}). The export is still running "
+                f"server-side — re-run with --export-id {export_id} to resume waiting for it "
+                f"instead of triggering a new one."
             )
         print(f"    [WAIT] export status={status!r}, retrying in {poll_interval_seconds}s...")
         sleep_fn(poll_interval_seconds)
 
 
+def _safe_relative_path(object_name: str) -> Path:
+    """Turn a Cloud Storage object name into a safe path under a dest dir.
+
+    Keeps the last two path segments (parent directory + filename) so files
+    from Vault's per-page/per-chunk subfolders don't collide, while
+    rejecting any '..' traversal segments defensively.
+    """
+    parts = [p for p in PurePosixPath(object_name).parts if p not in ("", ".", "..")]
+    if not parts:
+        raise ValueError(f"Unusable Cloud Storage object name: {object_name!r}")
+    return Path(*parts[-2:]) if len(parts) > 1 else Path(parts[-1])
+
+
+def _extract_zip_safely(zip_path: Path, dest_dir: Path) -> None:
+    """Extract a zip archive into dest_dir, guarding against zip-slip paths."""
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            member_path = (dest_dir / member.filename).resolve()
+            if not str(member_path).startswith(str(dest_dir.resolve()) + os.sep) and member_path != dest_dir.resolve():
+                print(f"    [WARN] skipping unsafe zip entry: {member.filename!r}")
+                continue
+            zf.extract(member, path=dest_dir)
+
+
 def download_export(export: dict, dest_dir: Path, creds) -> List[Path]:
     """Download every Cloud Storage object listed in a completed export's sink.
 
-    Returns the list of local file paths written.
+    Vault Drive exports typically deliver documents packaged as zip
+    archives alongside a separate metadata XML/CSV; any downloaded .zip is
+    extracted in place so the loose files land where vault.py's rglob-based
+    discovery (find_vault_export_files) expects them.
+
+    Returns the list of local file paths written (pre-extraction).
     """
     try:
         from google.cloud import storage
@@ -172,11 +268,20 @@ def download_export(export: dict, dest_dir: Path, creds) -> List[Path]:
     for f in files:
         bucket_name = f["bucketName"]
         object_name = f["objectName"]
-        local_path = dest_dir / Path(object_name).name
+        local_path = dest_dir / _safe_relative_path(object_name)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
         print(f"    [DOWNLOAD] gs://{bucket_name}/{object_name} -> {local_path}")
         blob = client.bucket(bucket_name).blob(object_name)
         blob.download_to_filename(str(local_path))
         downloaded.append(local_path)
+
+        if local_path.suffix.lower() == ".zip":
+            print(f"    [EXTRACT] {local_path.name} -> {local_path.parent}")
+            try:
+                _extract_zip_safely(local_path, local_path.parent)
+            except zipfile.BadZipFile as e:
+                print(f"    [WARN] could not extract {local_path.name}: {e}")
 
     return downloaded
 
@@ -189,34 +294,46 @@ def run_vault_export(
     org_unit_id: Optional[str] = None,
     account_emails: Optional[List[str]] = None,
     export_name: Optional[str] = None,
+    export_id: Optional[str] = None,
     include_shared_drives: bool = True,
     poll_interval_seconds: int = 30,
     timeout_seconds: int = 3600,
 ) -> Path:
-    """End-to-end: authenticate, trigger export, poll, download.
+    """End-to-end: authenticate, trigger (or resume) export, poll, download.
+
+    If `export_id` is given, an existing export is polled/downloaded rather
+    than a new one created — use this to resume after a timeout instead of
+    triggering a duplicate export.
+
+    Downloads land in `dest_dir / export_id`, keeping artifacts from
+    different export runs isolated so a stale metadata XML from a previous
+    run is never picked up alongside a new one.
 
     Returns the directory the exported artifacts were downloaded into.
     """
-    export_name = export_name or f"google-sites-pirate-{int(time.time())}"
-
     print("[VAULT-EXPORT] Authenticating Service Account...")
     creds = build_vault_credentials(
         service_account_path=service_account_path, subject=subject
     )
     vault_svc = build_vault_service(creds)
 
-    scope_desc = f"org unit {org_unit_id}" if org_unit_id else f"{len(account_emails)} account(s)"
-    print(f"[VAULT-EXPORT] Creating export {export_name!r} for {scope_desc}...")
-    export = create_sites_export(
-        vault_svc,
-        matter_id=matter_id,
-        name=export_name,
-        org_unit_id=org_unit_id,
-        account_emails=account_emails,
-        include_shared_drives=include_shared_drives,
-    )
-    export_id = export["id"]
-    print(f"[VAULT-EXPORT] Export created: id={export_id}, polling for completion...")
+    if export_id:
+        print(f"[VAULT-EXPORT] Resuming export id={export_id}, polling for completion...")
+    else:
+        export_name = export_name or f"google-sites-pirate-{int(time.time())}"
+        scope_desc = f"org unit {org_unit_id}" if org_unit_id else f"{len(account_emails)} account(s)"
+        print(f"[VAULT-EXPORT] Creating export {export_name!r} for {scope_desc}...")
+        export = create_sites_export(
+            vault_svc,
+            matter_id=matter_id,
+            name=export_name,
+            org_unit_id=org_unit_id,
+            account_emails=account_emails,
+            include_shared_drives=include_shared_drives,
+        )
+        export_id = export["id"]
+        print(f"[VAULT-EXPORT] Export created: id={export_id}. "
+              f"Save this ID to resume with --export-id if the wait times out.")
 
     export = poll_export(
         vault_svc,
@@ -227,6 +344,7 @@ def run_vault_export(
     )
     print("[VAULT-EXPORT] Export completed, downloading artifacts...")
 
-    downloaded = download_export(export, dest_dir, creds)
-    print(f"[VAULT-EXPORT] Downloaded {len(downloaded)} file(s) -> {dest_dir}")
-    return dest_dir
+    target_dir = Path(dest_dir) / export_id
+    downloaded = download_export(export, target_dir, creds)
+    print(f"[VAULT-EXPORT] Downloaded {len(downloaded)} file(s) -> {target_dir}")
+    return target_dir

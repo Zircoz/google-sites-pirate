@@ -49,7 +49,7 @@ There are two primary ways a Service Account can access Vault Matters created by
 1. **Domain-Wide Delegation (Recommended for Enterprise)**: A Google Workspace super admin can grant the Service Account [Domain-Wide Delegation](https://developers.google.com/identity/protocols/oauth2/service-account#delegatingauthority). This allows the Service Account to impersonate a human Vault Administrator and access all matters that the human admin can see.
 2. **Direct Matter Collaboration**: Alternatively, a human Vault Administrator can create a Matter in the Vault UI and explicitly add the Service Account's email address (e.g., `my-sa@project.iam.gserviceaccount.com`) as a **Collaborator** on that specific Matter using the [matters.addPermissions](https://developers.google.com/workspace/vault/reference/rest/v1/matters/addPermissions) API or via the Vault UI.
 
-The tool will require the `https://www.googleapis.com/auth/ediscovery` OAuth scope.
+The tool requires two OAuth scopes: `https://www.googleapis.com/auth/ediscovery` (to trigger/poll the export) and `https://www.googleapis.com/auth/devstorage.read_only` (to download the resulting artifacts from Cloud Storage). Under Domain-Wide Delegation, both scopes must be authorized for the Service Account's client ID, or token minting fails outright.
 
 ### Step 2: Matter Selection & Query Creation
 *   The human admin will create a Matter (e.g., "RAG Ingestion - Sites") and either share it with the Service Account or allow the Service Account to impersonate them.

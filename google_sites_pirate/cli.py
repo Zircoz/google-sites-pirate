@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 from googleapiclient.discovery import build
@@ -163,7 +164,7 @@ def run_vault(args):
 
     if args.trigger_export:
         try:
-            run_vault_export(
+            export_dir = run_vault_export(
                 matter_id=args.matter_id,
                 dest_dir=export_dir,
                 service_account_path=args.service_account,
@@ -171,6 +172,7 @@ def run_vault(args):
                 org_unit_id=args.org_unit_id,
                 account_emails=args.account_email,
                 export_name=args.export_name,
+                export_id=args.export_id,
                 include_shared_drives=not args.exclude_shared_drives,
                 poll_interval_seconds=args.poll_interval,
                 timeout_seconds=args.timeout,
@@ -248,7 +250,10 @@ def main(argv=None):
     # Vault subcommand
     vault_parser = subparsers.add_parser(
         "vault",
-        help="Ingest a Google Vault GSites export (metadata XML + PDFs) into Markdown",
+        help=(
+            "Ingest a Google Vault GSites export (metadata XML + PDFs) into Markdown, "
+            "optionally triggering and downloading the export itself via --trigger-export"
+        ),
     )
     vault_parser.add_argument(
         "export_dir",
@@ -292,6 +297,14 @@ def main(argv=None):
         help="Vault Matter ID to export from (required with --trigger-export)",
     )
     vault_parser.add_argument(
+        "--export-id",
+        help=(
+            "Resume an already-created export instead of triggering a new one "
+            "(e.g. after a previous run timed out while polling). Requires "
+            "--matter-id; --org-unit-id/--account-email are not needed."
+        ),
+    )
+    vault_parser.add_argument(
         "--org-unit-id",
         help="Organizational Unit ID for org-wide Sites discovery (searchMethod=ORG_UNIT)",
     )
@@ -302,7 +315,10 @@ def main(argv=None):
     )
     vault_parser.add_argument(
         "--service-account",
-        help="Path to a Service Account JSON key with Vault access (required with --trigger-export)",
+        help=(
+            "Path to a Service Account JSON key with Vault access. Required with "
+            "--trigger-export unless GOOGLE_SERVICE_ACCOUNT_JSON is set in the environment."
+        ),
     )
     vault_parser.add_argument(
         "--subject",
@@ -321,7 +337,7 @@ def main(argv=None):
         "--poll-interval",
         type=int,
         default=30,
-        help="Seconds between export status checks (default: 30)",
+        help="Seconds between export status checks, minimum 10 (default: 30)",
     )
     vault_parser.add_argument(
         "--timeout",
@@ -344,18 +360,36 @@ def main(argv=None):
         if args.trigger_export:
             if not args.matter_id:
                 vault_parser.error("--matter-id is required with --trigger-export")
-            if not args.service_account:
-                vault_parser.error("--service-account is required with --trigger-export")
-            if bool(args.org_unit_id) == bool(args.account_email):
+            if not args.service_account and not os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON"):
                 vault_parser.error(
-                    "exactly one of --org-unit-id or --account-email must be provided with --trigger-export"
+                    "--service-account (or GOOGLE_SERVICE_ACCOUNT_JSON env var) is required with --trigger-export"
+                )
+            if not args.export_id and bool(args.org_unit_id) == bool(args.account_email):
+                vault_parser.error(
+                    "exactly one of --org-unit-id or --account-email must be provided with "
+                    "--trigger-export, unless resuming via --export-id"
+                )
+            if args.poll_interval < 10:
+                vault_parser.error("--poll-interval must be at least 10 seconds")
+        else:
+            trigger_only_args = {
+                "--matter-id": args.matter_id,
+                "--export-id": args.export_id,
+                "--org-unit-id": args.org_unit_id,
+                "--account-email": args.account_email,
+                "--subject": args.subject,
+                "--export-name": args.export_name,
+            }
+            ignored = [name for name, value in trigger_only_args.items() if value]
+            if ignored:
+                print(
+                    f"[WARN] {', '.join(ignored)} only apply with --trigger-export and will be ignored."
                 )
         run_vault(args)
     elif args.command == "scrape":
         # Validate that we have some way to identify the target
         if not args.url and not args.credentials and not args.service_account:
             # Check environment variables before complaining
-            import os
             has_env_auth = any(os.environ.get(var) for var in [
                 "GOOGLE_SERVICE_ACCOUNT_JSON",
                 "GOOGLE_CREDENTIALS_JSON",
