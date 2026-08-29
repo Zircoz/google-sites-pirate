@@ -20,6 +20,7 @@ dependencies = [
     "playwright",
     "requests",
     "pdfminer.six>=20221105",
+    "google-cloud-storage",
 ]
 
 [project.urls]

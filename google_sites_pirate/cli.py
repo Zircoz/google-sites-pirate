@@ -23,6 +23,7 @@ from google_sites_pirate.vault import (
     ingest_vault_export,
     merge_with_scrape,
 )
+from google_sites_pirate.vault_export import run_vault_export
 
 def run_scrape(args):
     out = Path(args.output)
@@ -159,7 +160,25 @@ def run_info(args):
 
 def run_vault(args):
     export_dir = Path(args.export_dir)
-    if not export_dir.exists():
+
+    if args.trigger_export:
+        try:
+            run_vault_export(
+                matter_id=args.matter_id,
+                dest_dir=export_dir,
+                service_account_path=args.service_account,
+                subject=args.subject,
+                org_unit_id=args.org_unit_id,
+                account_emails=args.account_email,
+                export_name=args.export_name,
+                include_shared_drives=not args.exclude_shared_drives,
+                poll_interval_seconds=args.poll_interval,
+                timeout_seconds=args.timeout,
+            )
+        except Exception as e:
+            print(f'[ERROR] Vault export failed: {e}')
+            sys.exit(1)
+    elif not export_dir.exists():
         print(f'[ERROR] Export directory not found: {export_dir}')
         sys.exit(1)
 
@@ -233,7 +252,11 @@ def main(argv=None):
     )
     vault_parser.add_argument(
         "export_dir",
-        help="Path to the Vault export directory (containing *-metadata.xml and *_gsite_0/*.pdf)",
+        help=(
+            "Path to the Vault export directory (containing *-metadata.xml and "
+            "*_gsite_0/*.pdf). With --trigger-export, used as the download "
+            "destination instead."
+        ),
     )
     vault_parser.add_argument(
         "--output",
@@ -255,6 +278,57 @@ def main(argv=None):
         default="",
         help="Override the site display name used for the output subdirectory",
     )
+    vault_parser.add_argument(
+        "--trigger-export",
+        action="store_true",
+        help=(
+            "Trigger the Vault export via the Vault API instead of reading a "
+            "pre-existing export directory. export_dir is used as the download "
+            "destination and does not need to exist beforehand."
+        ),
+    )
+    vault_parser.add_argument(
+        "--matter-id",
+        help="Vault Matter ID to export from (required with --trigger-export)",
+    )
+    vault_parser.add_argument(
+        "--org-unit-id",
+        help="Organizational Unit ID for org-wide Sites discovery (searchMethod=ORG_UNIT)",
+    )
+    vault_parser.add_argument(
+        "--account-email",
+        action="append",
+        help="Account email to scope the export to (searchMethod=ACCOUNT); repeatable",
+    )
+    vault_parser.add_argument(
+        "--service-account",
+        help="Path to a Service Account JSON key with Vault access (required with --trigger-export)",
+    )
+    vault_parser.add_argument(
+        "--subject",
+        help="Email of a Vault Administrator to impersonate via Domain-Wide Delegation",
+    )
+    vault_parser.add_argument(
+        "--export-name",
+        help="Display name for the Vault export (default: auto-generated)",
+    )
+    vault_parser.add_argument(
+        "--exclude-shared-drives",
+        action="store_true",
+        help="Exclude shared drives from the export query (included by default)",
+    )
+    vault_parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=30,
+        help="Seconds between export status checks (default: 30)",
+    )
+    vault_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        help="Max seconds to wait for the export to complete (default: 3600)",
+    )
 
     # Info subcommand
     info_parser = subparsers.add_parser("info", help="Retrieve metadata info of a Google Drive file")
@@ -267,6 +341,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "vault":
+        if args.trigger_export:
+            if not args.matter_id:
+                vault_parser.error("--matter-id is required with --trigger-export")
+            if not args.service_account:
+                vault_parser.error("--service-account is required with --trigger-export")
+            if bool(args.org_unit_id) == bool(args.account_email):
+                vault_parser.error(
+                    "exactly one of --org-unit-id or --account-email must be provided with --trigger-export"
+                )
         run_vault(args)
     elif args.command == "scrape":
         # Validate that we have some way to identify the target
