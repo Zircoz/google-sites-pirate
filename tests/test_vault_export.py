@@ -422,3 +422,22 @@ class DownloadExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# run_vault_export
+# ---------------------------------------------------------------------------
+
+
+class RunVaultExportTests(unittest.TestCase):
+    def test_missing_scope_surfaces_value_error_not_type_error(self):
+        """Regression: the progress line used to call len(account_emails)
+        before create_sites_export could validate, so omitting both scopes
+        raised an unrelated TypeError instead of the intended ValueError."""
+        with patch.object(vault_export, "build_vault_credentials", return_value=object()), \
+             patch.object(vault_export, "build_vault_service", return_value=MagicMock()):
+            with self.assertRaises(ValueError) as ctx:
+                vault_export.run_vault_export(matter_id="matter-1", dest_dir="/tmp/unused")
+
+        self.assertIn("Exactly one of org_unit_id or account_emails", str(ctx.exception))
+

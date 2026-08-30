@@ -347,7 +347,15 @@ def run_vault_export(
         print(f"[VAULT-EXPORT] Resuming export id={export_id}, polling for completion...")
     else:
         export_name = export_name or f"google-sites-pirate-{int(time.time())}"
-        scope_desc = f"org unit {org_unit_id}" if org_unit_id else f"{len(account_emails)} account(s)"
+        # create_sites_export enforces the exactly-one-scope rule. Keep this
+        # description total so that its ValueError is what surfaces, rather
+        # than a TypeError from len(None) masking it.
+        if org_unit_id:
+            scope_desc = f"org unit {org_unit_id}"
+        elif account_emails:
+            scope_desc = f"{len(account_emails)} account(s)"
+        else:
+            scope_desc = "(no scope specified)"
         print(f"[VAULT-EXPORT] Creating export {export_name!r} for {scope_desc}...")
         export = create_sites_export(
             vault_svc,
