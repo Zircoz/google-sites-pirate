@@ -108,6 +108,8 @@ google-sites-pirate vault ./vault_dl --trigger-export \
 * Use `--account-email` (repeatable) instead of `--org-unit-id` to scope the export to specific accounts.
 * If the wait exceeds `--timeout` (default 3600s), the export keeps running server-side. Re-run with `--export-id <ID>` (printed on creation) to resume polling instead of triggering a duplicate export.
 * Downloads land in `<export_dir>/<export_id>` so artifacts from different runs never mix.
+* `--org-unit-id` must be the full prefixed Admin SDK org unit ID (e.g. `id:03ph8a2z1k9qrst`), not the bare ID shown in the Admin console URL.
+* `--trigger-export` needs the optional Cloud Storage dependency: `pip install 'google-sites-pirate[vault-export]'` (or `pip install google-cloud-storage`). It is not needed for `scrape` or for ingesting a pre-existing export directory.
 
 #### Merge vault metadata into existing scraper output
 ```bash

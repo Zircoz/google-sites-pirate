@@ -20,8 +20,10 @@ dependencies = [
     "playwright",
     "requests",
     "pdfminer.six>=20221105",
-    "google-cloud-storage",
 ]
+
+[project.optional-dependencies]
+vault-export = ["google-cloud-storage"]
 
 [project.urls]
 Homepage = "https://github.com/Zircoz/google-sites-pirate"

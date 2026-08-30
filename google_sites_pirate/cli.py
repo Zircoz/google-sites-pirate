@@ -369,8 +369,30 @@ def main(argv=None):
                     "exactly one of --org-unit-id or --account-email must be provided with "
                     "--trigger-export, unless resuming via --export-id"
                 )
+            if args.export_id:
+                # --export-id resumes an already-created export, so every flag
+                # that only shapes a *new* export's query is silently dropped.
+                resume_only_ignored = {
+                    "--org-unit-id": args.org_unit_id,
+                    "--account-email": args.account_email,
+                    "--export-name": args.export_name,
+                    "--exclude-shared-drives": args.exclude_shared_drives,
+                }
+                ignored = [name for name, value in resume_only_ignored.items() if value]
+                if ignored:
+                    print(
+                        f"[WARN] {', '.join(ignored)} only apply when creating a new export. "
+                        f"--export-id resumes export {args.export_id}, whose query is already "
+                        f"fixed server-side, so they will be ignored."
+                    )
             if args.poll_interval < 10:
                 vault_parser.error("--poll-interval must be at least 10 seconds")
+            if args.timeout < args.poll_interval:
+                vault_parser.error(
+                    f"--timeout ({args.timeout}s) must be at least --poll-interval "
+                    f"({args.poll_interval}s), otherwise the wait times out before the "
+                    f"first status check"
+                )
         else:
             trigger_only_args = {
                 "--matter-id": args.matter_id,

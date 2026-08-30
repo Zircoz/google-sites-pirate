@@ -41,6 +41,10 @@ _IN_PROGRESS_STATUSES = ("EXPORT_STATUS_UNSPECIFIED", "IN_PROGRESS")
 # potentially hour-long poll loop.
 _RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504)
 
+# HTTP statuses that mean "the caller is not allowed to touch this matter",
+# as opposed to a transient failure worth retrying.
+_ACCESS_DENIED_HTTP_STATUSES = (401, 403, 404)
+
 _DWD_HINT = (
     "This usually means the Service Account is missing Domain-Wide "
     "Delegation authorization for BOTH required scopes:\n"
@@ -48,9 +52,24 @@ _DWD_HINT = (
     f"    {GCS_READONLY_SCOPE}\n"
     "A Workspace super admin must authorize the Service Account's client ID "
     "for both scopes in Admin console -> Security -> API controls -> "
-    "Domain-wide delegation. Alternatively, add the Service Account as a "
-    "collaborator on the Matter directly (see PROPOSAL_VAULT_API.md) — no "
-    "--subject is needed in that case."
+    "Domain-wide delegation."
+)
+
+_MATTER_ACCESS_HINT = (
+    "The Service Account authenticated successfully but is not authorized on "
+    "this Matter (or the Matter ID is wrong / the Matter is closed).\n"
+    "Check, in order:\n"
+    "  1. --matter-id matches an OPEN Matter in Vault.\n"
+    "  2. --subject names a human Vault Administrator with access to that "
+    "Matter, and the Service Account is authorized to impersonate them via "
+    "Domain-Wide Delegation for both scopes:\n"
+    f"       {VAULT_SCOPE}\n"
+    f"       {GCS_READONLY_SCOPE}\n"
+    "  3. If you are relying on the Service Account being a direct Matter "
+    "collaborator rather than on impersonation, verify that grant actually "
+    "took effect — Vault matter permissions are granted to Workspace users "
+    "holding Vault privileges, which a *.iam.gserviceaccount.com identity "
+    "generally is not. Passing --subject is the supported headless path."
 )
 
 
@@ -124,6 +143,8 @@ def _execute_with_retry(request_factory, description: str, max_attempts: int = 5
                       f"(attempt {attempt}/{max_attempts})...")
                 sleep_fn(delay)
                 continue
+            if status in _ACCESS_DENIED_HTTP_STATUSES:
+                raise RuntimeError(f"{description} failed with HTTP {status}: {e}\n{_MATTER_ACCESS_HINT}")
             raise RuntimeError(f"{description} failed: {e}")
 
 
@@ -168,10 +189,11 @@ def create_sites_export(
     )
 
 
-def get_export(vault_svc, matter_id: str, export_id: str):
+def get_export(vault_svc, matter_id: str, export_id: str, sleep_fn=time.sleep):
     return _execute_with_retry(
         lambda: vault_svc.matters().exports().get(matterId=matter_id, exportId=export_id),
         description="Fetching Vault export status",
+        sleep_fn=sleep_fn,
     )
 
 
@@ -192,7 +214,7 @@ def poll_export(
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
-        export = get_export(vault_svc, matter_id, export_id)
+        export = get_export(vault_svc, matter_id, export_id, sleep_fn=sleep_fn)
         status = export.get("status", "EXPORT_STATUS_UNSPECIFIED")
         if status == "COMPLETED":
             return export
@@ -250,7 +272,8 @@ def download_export(export: dict, dest_dir: Path, creds) -> List[Path]:
     except ImportError:
         raise RuntimeError(
             "google-cloud-storage is required to download Vault exports.\n"
-            "Install it with: pip install google-cloud-storage"
+            "Install it with: pip install 'google-sites-pirate[vault-export]'\n"
+            "(or directly: pip install google-cloud-storage)"
         )
 
     sink = export.get("cloudStorageSink", {})
@@ -266,8 +289,11 @@ def download_export(export: dict, dest_dir: Path, creds) -> List[Path]:
     client = storage.Client(credentials=creds, project=getattr(creds, "project_id", None))
     downloaded: List[Path] = []
     for f in files:
-        bucket_name = f["bucketName"]
-        object_name = f["objectName"]
+        bucket_name = f.get("bucketName")
+        object_name = f.get("objectName")
+        if not bucket_name or not object_name:
+            print(f"    [WARN] skipping malformed cloudStorageSink entry: {f!r}")
+            continue
         local_path = dest_dir / _safe_relative_path(object_name)
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
