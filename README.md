@@ -110,6 +110,7 @@ google-sites-pirate vault ./vault_dl --trigger-export \
 * Downloads land in `<export_dir>/<export_id>` so artifacts from different runs never mix.
 * `--org-unit-id` must be the full prefixed Admin SDK org unit ID (e.g. `id:03ph8a2z1k9qrst`), not the bare ID shown in the Admin console URL.
 * `--trigger-export` needs the optional Cloud Storage dependency: `pip install 'google-sites-pirate[vault-export]'` (or `pip install google-cloud-storage`). It is not needed for `scrape` or for ingesting a pre-existing export directory.
+* Exports land in a Google-managed Cloud Storage bucket (not one you configure) and expire after roughly 15 days; they also count against per-Matter export limits, and this tool does not delete old exports, so repeated runs without `--export-id` will accumulate them.
 
 #### Merge vault metadata into existing scraper output
 ```bash

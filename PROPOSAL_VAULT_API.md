@@ -3,7 +3,7 @@
 ## Executive Summary
 The current `google-sites-pirate` tool successfully scrapes Google Sites into Markdown for RAG applications. However, its reliance on the Drive API for discovery and Playwright for page-by-page rendering makes it difficult to scale within large Google Workspace Enterprise environments.
 
-This proposal outlines an architectural shift to integrate the **Google Vault API**. By leveraging Vault's eDiscovery and bulk export capabilities, we can transform `google-sites-pirate` into a high-performance, organization-wide archiving and RAG ingestion tool, capable of bypassing UI rendering bottlenecks while ensuring strict compliance with enterprise data governance.
+This proposal outlines an architectural shift to integrate the **Google Vault API**. By leveraging Vault's eDiscovery and bulk export capabilities, we can transform `google-sites-pirate` into a high-performance, organization-wide archiving and RAG ingestion tool, capable of moving page rendering server-side (no local browser fleet) while ensuring strict compliance with enterprise data governance.
 
 ---
 
@@ -27,11 +27,11 @@ By integrating Vault API, `google-sites-pirate` can request server-side bulk exp
 1. **Organization-Wide Discovery (Super Admin Access)**
    Instead of searching a single user's Drive, we can create a Vault "Matter" and query the `DRIVE` corpus with the term `type:site`. This queries all sites across the specified OU, including privately shared and unpublished sites, bypassing the need for individual share access.
 
-2. **Bulk Server-Side Export (Zero Playwright)**
-   Vault can generate an asynchronous export of the underlying Site data directly to Google Cloud Storage. The tool will no longer need to "click through" navigations. It can download the raw data sink files directly from the GCP bucket.
+2. **Bulk Server-Side Export (no local browser fleet)**
+   Vault can generate an asynchronous export of the underlying Site data directly to Google Cloud Storage. Rendering is not eliminated — Vault delivers a Chromium-rendered PDF per page — but it happens server-side on Google's infrastructure instead of via a local Playwright fleet clicking through navigations. The tool downloads the raw data sink files directly from the GCP bucket.
 
-3. **Complete Content Capture**
-   Vault exports include exact metadata, revision history contexts, and all page content (even unlinked pages). This ensures 100% data fidelity for RAG systems.
+3. **Complete Content Coverage**
+   Vault exports include exact metadata, revision history contexts, and all page content, including unlinked/orphaned and unpublished pages. This guarantees complete *coverage* for RAG systems, not complete *fidelity*: because the artifacts are PDFs, extracting text from them (pdfminer + regex de-noising) loses link targets, heading semantics, table structure, and image alt text, so structural fidelity is actually lower than the existing HTML-to-markdownify scrape path.
 
 4. **Point-in-Time & Held Data Scraping**
    The tool can be configured to scrape data subject to Legal Holds or point-in-time constraints (e.g., "Export sites as they were on Q3 close").
@@ -80,4 +80,4 @@ The tool requires two OAuth scopes: `https://www.googleapis.com/auth/ediscovery`
 
 ## Conclusion
 
-By adopting the Google Vault API, `google-sites-pirate` will evolve from a targeted web-scraper into a robust, enterprise-grade ingestion pipeline. It will offer unparalleled speed by eliminating UI rendering, guarantee 100% data capture through administrative scopes, and align perfectly with Enterprise compliance and governance standards.
+By adopting the Google Vault API, `google-sites-pirate` will evolve from a targeted web-scraper into a robust, enterprise-grade ingestion pipeline. It will offer substantial speed and scale gains by moving rendering server-side and dropping the local browser fleet, guarantee complete page coverage (including unlinked and unpublished pages) through administrative scopes, and align perfectly with Enterprise compliance and governance standards — at the cost of lower structural fidelity than the HTML scrape path, since the exported artifacts are PDFs.

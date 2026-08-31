@@ -52,7 +52,10 @@ _DWD_HINT = (
     f"    {GCS_READONLY_SCOPE}\n"
     "A Workspace super admin must authorize the Service Account's client ID "
     "for both scopes in Admin console -> Security -> API controls -> "
-    "Domain-wide delegation."
+    "Domain-wide delegation.\n"
+    "As an alternative to Domain-Wide Delegation, the Service Account can "
+    "instead be added directly as a collaborator on the Matter (see "
+    "PROPOSAL_VAULT_API.md) — in that case --subject is not needed."
 )
 
 _MATTER_ACCESS_HINT = (
@@ -66,10 +69,11 @@ _MATTER_ACCESS_HINT = (
     f"       {VAULT_SCOPE}\n"
     f"       {GCS_READONLY_SCOPE}\n"
     "  3. If you are relying on the Service Account being a direct Matter "
-    "collaborator rather than on impersonation, verify that grant actually "
-    "took effect — Vault matter permissions are granted to Workspace users "
-    "holding Vault privileges, which a *.iam.gserviceaccount.com identity "
-    "generally is not. Passing --subject is the supported headless path."
+    "collaborator rather than on impersonation, verify that the Service "
+    "Account's own email was actually added as a collaborator on THIS "
+    "specific Matter (via the Vault UI or matters.addPermissions) — this "
+    "grant is per-Matter, so it must be repeated for every Matter you "
+    "export from."
 )
 
 
