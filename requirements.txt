@@ -8,3 +8,5 @@ lxml
 playwright
 requests
 pdfminer.six>=20221105
+# Only required for `vault --trigger-export`
+google-cloud-storage
